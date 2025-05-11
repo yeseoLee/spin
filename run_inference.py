@@ -3,46 +3,33 @@ import os
 
 import numpy as np
 import pytorch_lightning as pl
+from SPIN.utils import ArgParser, casting, numpy_metrics, parser_utils
+from SPIN.utils.python_utils import ensure_list
 import torch
 import tsl
-import yaml
 from tsl import config
-from tsl.data import SpatioTemporalDataModule, ImputationDataset
+from tsl.data import ImputationDataset, SpatioTemporalDataModule
 from tsl.data.preprocessing import StandardScaler
-from tsl.datasets import AirQuality, MetrLA, PemsBay
+from tsl.datasets import PemsBay
 from tsl.engines import Imputer
-from tsl.nn.models.stgn import GRINModel
-from tsl.nn.utils import casting
+from tsl.nn.models import GRINModel, SPINHierarchicalModel, SPINModel
 from tsl.ops.imputation import add_missing_values, sample_mask
-from tsl.utils import ArgParser, parser_utils, numpy_metrics
-from tsl.utils.python_utils import ensure_list
-
-from spin.baselines import SAITS, TransformerModel, BRITS
-from spin.imputers import SPINImputer, SAITSImputer, BRITSImputer
-from spin.models import SPINModel, SPINHierarchicalModel
+import yaml
 
 
 def get_model_classes(model_str):
     if model_str == "spin":
-        model, filler = SPINModel, SPINImputer
+        model, filler = SPINModel, Imputer
     elif model_str == "spin_h":
-        model, filler = SPINHierarchicalModel, SPINImputer
+        model, filler = SPINHierarchicalModel, Imputer
     elif model_str == "grin":
         model, filler = GRINModel, Imputer
-    elif model_str == "saits":
-        model, filler = SAITS, SAITSImputer
-    elif model_str == "transformer":
-        model, filler = TransformerModel, SPINImputer
-    elif model_str == "brits":
-        model, filler = BRITS, BRITSImputer
     else:
         raise ValueError(f"Model {model_str} not available.")
     return model, filler
 
 
 def get_dataset(dataset_name: str):
-    if dataset_name.startswith("air"):
-        return AirQuality(impute_nans=True, small=dataset_name[3:] == "36")
     # build missing dataset
     if dataset_name.endswith("_point"):
         p_fault, p_noise = 0.0, 0.25
@@ -52,15 +39,6 @@ def get_dataset(dataset_name: str):
         dataset_name = dataset_name[:-6]
     else:
         raise ValueError(f"Invalid dataset name: {dataset_name}.")
-    if dataset_name == "la":
-        return add_missing_values(
-            MetrLA(),
-            p_fault=p_fault,
-            p_noise=p_noise,
-            min_seq=12,
-            max_seq=12 * 4,
-            seed=9101112,
-        )
     if dataset_name == "bay":
         return add_missing_values(
             PemsBay(),
@@ -109,13 +87,13 @@ def parse_args():
 
 def load_model(exp_dir, exp_config, dm):
     model_cls, imputer_class = get_model_classes(exp_config["model_name"])
-    additional_model_hparams = dict(
-        n_nodes=dm.n_nodes,
-        input_size=dm.n_channels,
-        u_size=4,
-        output_size=dm.n_channels,
-        window_size=dm.window,
-    )
+    additional_model_hparams = {
+        "n_nodes": dm.n_nodes,
+        "input_size": dm.n_channels,
+        "u_size": 4,
+        "output_size": dm.n_channels,
+        "window_size": dm.window,
+    }
 
     # model's inputs
     model_kwargs = parser_utils.filter_args(
@@ -125,9 +103,7 @@ def load_model(exp_dir, exp_config, dm):
     )
 
     # setup imputer
-    imputer_kwargs = parser_utils.filter_argparse_args(
-        exp_config, imputer_class, return_dict=True
-    )
+    imputer_kwargs = parser_utils.filter_argparse_args(exp_config, imputer_class, return_dict=True)
     imputer = imputer_class(
         model_class=model_cls,
         model_kwargs=model_kwargs,
@@ -143,7 +119,7 @@ def load_model(exp_dir, exp_config, dm):
             model_path = os.path.join(exp_dir, file)
             break
     if model_path is None:
-        raise ValueError(f"Model not found.")
+        raise ValueError("Model not found.")
 
     imputer.load_model(model_path)
     imputer.freeze()
@@ -200,7 +176,7 @@ def run_experiment(args):
     ########################################
 
     # time embedding
-    if is_spin or args.model_name == "transformer":
+    if is_spin:
         time_emb = dataset.datetime_encoded(["day", "week"]).values
         exog_map = {"global_temporal_encoding": time_emb}
 
@@ -209,9 +185,7 @@ def run_experiment(args):
         exog_map = input_map = None
 
     if is_spin or args.model_name == "grin":
-        adj = dataset.get_connectivity(
-            threshold=args.adj_threshold, include_self=False, force_symmetric=is_spin
-        )
+        adj = dataset.get_connectivity(threshold=args.adj_threshold, include_self=False, force_symmetric=is_spin)
     else:
         adj = None
 
@@ -232,9 +206,7 @@ def run_experiment(args):
 
     scalers = {"data": StandardScaler(axis=(0, 1))}
 
-    dm = SpatioTemporalDataModule(
-        torch_dataset, scalers=scalers, splitter=splitter, batch_size=args.batch_size
-    )
+    dm = SpatioTemporalDataModule(torch_dataset, scalers=scalers, splitter=splitter, batch_size=args.batch_size)
     dm.setup()
 
     ########################################
@@ -243,7 +215,7 @@ def run_experiment(args):
 
     imputer = load_model(exp_dir, exp_config, dm)
 
-    trainer = pl.Trainer(gpus=int(torch.cuda.is_available()))
+    trainer = pl.Trainer(accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1)
 
     ########################################
     # inference                            #

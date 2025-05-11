@@ -4,50 +4,36 @@ import os
 
 import numpy as np
 import pytorch_lightning as pl
-import torch
-import yaml
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
+from SPIN.utils import ArgParser, casting, numpy_metrics, parser_utils
+import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tsl import config, logger
-from tsl.data import SpatioTemporalDataModule, ImputationDataset
+from tsl.data import ImputationDataset, SpatioTemporalDataModule
 from tsl.data.preprocessing import StandardScaler
-from tsl.datasets import AirQuality, MetrLA, PemsBay
+from tsl.datasets import PemsBay
 from tsl.engines import Imputer
-from tsl.metrics.torch import MaskedMetric, MaskedMAE, MaskedMSE, MaskedMRE
-from tsl.nn.models.stgn import GRINModel
-from tsl.utils import casting
+from tsl.imputers import Imputer
+from tsl.metrics.torch import MaskedMAE, MaskedMetric, MaskedMRE, MaskedMSE
+from tsl.nn.models import GRINModel, SPINHierarchicalModel, SPINModel
 from tsl.ops.imputation import add_missing_values
-from tsl.utils import parser_utils, numpy_metrics
-from tsl.utils.parser_utils import ArgParser
-
-from spin.baselines import SAITS, TransformerModel, BRITS
-from spin.imputers import SPINImputer, SAITSImputer, BRITSImputer
-from spin.models import SPINModel, SPINHierarchicalModel
-from spin.scheduler import CosineSchedulerWithRestarts
+import yaml
 
 
 def get_model_classes(model_str):
     if model_str == "spin":
-        model, filler = SPINModel, SPINImputer
+        model, filler = SPINModel, Imputer
     elif model_str == "spin_h":
-        model, filler = SPINHierarchicalModel, SPINImputer
+        model, filler = SPINHierarchicalModel, Imputer
     elif model_str == "grin":
         model, filler = GRINModel, Imputer
-    elif model_str == "saits":
-        model, filler = SAITS, SAITSImputer
-    elif model_str == "transformer":
-        model, filler = TransformerModel, SPINImputer
-    elif model_str == "brits":
-        model, filler = BRITS, BRITSImputer
     else:
         raise ValueError(f"Model {model_str} not available.")
     return model, filler
 
 
 def get_dataset(dataset_name: str):
-    if dataset_name.startswith("air"):
-        return AirQuality(impute_nans=True, small=dataset_name[3:] == "36")
     # build missing dataset
     if dataset_name.endswith("_point"):
         p_fault, p_noise = 0.0, 0.25
@@ -57,15 +43,6 @@ def get_dataset(dataset_name: str):
         dataset_name = dataset_name[:-6]
     else:
         raise ValueError(f"Invalid dataset name: {dataset_name}.")
-    if dataset_name == "la":
-        return add_missing_values(
-            MetrLA(),
-            p_fault=p_fault,
-            p_noise=p_noise,
-            min_seq=12,
-            max_seq=12 * 4,
-            seed=9101112,
-        )
     if dataset_name == "bay":
         return add_missing_values(
             PemsBay(),
@@ -84,16 +61,16 @@ def get_scheduler(scheduler_name: str = None, args=None):
     scheduler_name = scheduler_name.lower()
     if scheduler_name == "cosine":
         scheduler_class = CosineAnnealingLR
-        scheduler_kwargs = dict(eta_min=0.1 * args.lr, T_max=args.epochs)
-    elif scheduler_name == "magic":
-        scheduler_class = CosineSchedulerWithRestarts
-        scheduler_kwargs = dict(
-            num_warmup_steps=12,
-            min_factor=0.1,
-            linear_decay=0.67,
-            num_training_steps=args.epochs,
-            num_cycles=args.epochs // 100,
-        )
+        scheduler_kwargs = {"eta_min": 0.1 * args.lr, "T_max": args.epochs}
+    # elif scheduler_name == "magic":
+    #     scheduler_class = CosineSchedulerWithRestarts
+    #     scheduler_kwargs = {
+    #         "num_warmup_steps": 12,
+    #         "min_factor": 0.1,
+    #         "linear_decay": 0.67,
+    #         "num_training_steps": args.epochs,
+    #         "num_cycles": args.epochs // 100,
+    #     }
     else:
         raise ValueError(f"Invalid scheduler name: {scheduler_name}.")
     return scheduler_class, scheduler_kwargs
@@ -106,7 +83,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=-1)
     parser.add_argument("--precision", type=int, default=32)
     parser.add_argument("--model-name", type=str, default="spin")
-    parser.add_argument("--dataset-name", type=str, default="air36")
+    parser.add_argument("--dataset-name", type=str, default="bay_block")
     parser.add_argument("--config", type=str, default="imputation/spin.yaml")
 
     # Splitting/aggregation params
@@ -172,16 +149,14 @@ def run_experiment(args):
     # save config for logging
     os.makedirs(logdir, exist_ok=True)
     with open(os.path.join(logdir, "config.yaml"), "w") as fp:
-        yaml.dump(
-            parser_utils.config_dict_from_args(args), fp, indent=4, sort_keys=True
-        )
+        yaml.dump(parser_utils.config_dict_from_args(args), fp, indent=4, sort_keys=True)
 
     ########################################
     # data module                          #
     ########################################
 
     # time embedding
-    if is_spin or args.model_name == "transformer":
+    if is_spin:
         time_emb = dataset.datetime_encoded(["day", "week"]).values
         exog_map = {"global_temporal_encoding": time_emb}
 
@@ -190,9 +165,7 @@ def run_experiment(args):
         exog_map = input_map = None
 
     if is_spin or args.model_name == "grin":
-        adj = dataset.get_connectivity(
-            threshold=args.adj_threshold, include_self=False, force_symmetric=is_spin
-        )
+        adj = dataset.get_connectivity(threshold=args.adj_threshold, include_self=False, force_symmetric=is_spin)
     else:
         adj = None
 
@@ -225,13 +198,13 @@ def run_experiment(args):
     # predictor                            #
     ########################################
 
-    additional_model_hparams = dict(
-        n_nodes=dm.n_nodes,
-        input_size=dm.n_channels,
-        u_size=4,
-        output_size=dm.n_channels,
-        window_size=dm.window,
-    )
+    additional_model_hparams = {
+        "n_nodes": dm.n_nodes,
+        "input_size": dm.n_channels,
+        "u_size": 4,
+        "output_size": dm.n_channels,
+        "window_size": dm.window,
+    }
 
     # model's inputs
     model_kwargs = parser_utils.filter_args(
@@ -256,9 +229,7 @@ def run_experiment(args):
     scheduler_class, scheduler_kwargs = get_scheduler(args.lr_scheduler, args)
 
     # setup imputer
-    imputer_kwargs = parser_utils.filter_argparse_args(
-        args, imputer_class, return_dict=True
-    )
+    imputer_kwargs = parser_utils.filter_argparse_args(args, imputer_class, return_dict=True)
     imputer = imputer_class(
         model_class=model_cls,
         model_kwargs=model_kwargs,
@@ -276,12 +247,8 @@ def run_experiment(args):
     ########################################
 
     # callbacks
-    early_stop_callback = EarlyStopping(
-        monitor="val_mae", patience=args.patience, mode="min"
-    )
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=logdir, save_top_k=1, monitor="val_mae", mode="min"
-    )
+    early_stop_callback = EarlyStopping(monitor="val_mae", patience=args.patience, mode="min")
+    checkpoint_callback = ModelCheckpoint(dirpath=logdir, save_top_k=1, monitor="val_mae", mode="min")
 
     tb_logger = TensorBoardLogger(logdir, name="model")
 
@@ -291,7 +258,8 @@ def run_experiment(args):
         logger=tb_logger,
         precision=args.precision,
         accumulate_grad_batches=args.split_batch_in,
-        gpus=int(torch.cuda.is_available()),
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        devices=1,
         gradient_clip_val=args.grad_clip_val,
         limit_train_batches=args.batches_epoch * args.split_batch_in,
         callbacks=[early_stop_callback, checkpoint_callback],
@@ -309,13 +277,9 @@ def run_experiment(args):
 
     imputer.load_model(checkpoint_callback.best_model_path)
     imputer.freeze()
-    trainer.test(
-        imputer, dataloaders=dm.test_dataloader(batch_size=args.batch_inference)
-    )
+    trainer.test(imputer, dataloaders=dm.test_dataloader(batch_size=args.batch_inference))
 
-    output = trainer.predict(
-        imputer, dataloaders=dm.test_dataloader(batch_size=args.batch_inference)
-    )
+    output = trainer.predict(imputer, dataloaders=dm.test_dataloader(batch_size=args.batch_inference))
     output = casting.numpy(output)
     y_hat, y_true, mask = (
         output["y_hat"].squeeze(-1),
