@@ -75,6 +75,75 @@ def get_scheduler(scheduler_name: str = None, args=None):
     return scheduler_class, scheduler_kwargs
 
 
+def add_imputer_args(parser):
+    """Imputer 클래스에 필요한 인자를 추가합니다. add_argparse_args 메서드 대체용입니다."""
+    group = parser.add_argument_group("Imputer")
+    group.add_argument("--whiten-prob", type=float, default=0.05)
+    group.add_argument("--prediction-loss-weight", type=float, default=1.0)
+    group.add_argument("--reconstruction-loss-weight", type=float, default=1.0)
+    group.add_argument("--truncated-bptt-steps", type=int, default=None)
+    return parser
+
+
+def add_imputation_dataset_args(parser):
+    """ImputationDataset 클래스에 필요한 인자를 추가합니다. add_argparse_args 메서드 대체용입니다."""
+    group = parser.add_argument_group("ImputationDataset")
+    group.add_argument("--window", type=int, default=12)
+    group.add_argument("--stride", type=int, default=1)
+    group.add_argument("--horizon", type=int, default=None)
+    return parser
+
+
+def add_spin_model_args(parser):
+    """SPINModel과 SPINHierarchicalModel에 필요한 인자를 추가합니다. add_model_specific_args 메서드 대체용입니다."""
+    group = parser.add_argument_group("SPINModel")
+    group.add_argument("--self", action="store_true", default=True)
+    group.add_argument("--hidden-size", type=int, default=32)
+    group.add_argument("--temporal-self-attention", action="store_true", default=True)
+    group.add_argument(
+        "--reweigh", type=str, default="softmax"
+    )  # reweigh -> reweigh로 변경
+    group.add_argument("--n-layers", type=int, default=4)
+    group.add_argument("--eta", type=float, default=3.0)
+    group.add_argument("--message-layers", type=int, default=1)
+
+    # SPINHierarchicalModel 관련 추가 인자
+    group.add_argument("--h-size", type=int, default=32)
+    group.add_argument("--z-size", type=int, default=128)
+    group.add_argument("--z-heads", type=int, default=4)
+    group.add_argument("--update-z-cross", action="store_true", default=False)
+    group.add_argument("--norm", action="store_true", default=True)
+    group.add_argument("--spatial-aggr", type=str, default="softmax")
+    return parser
+
+
+def add_grin_model_args(parser):
+    """GRINModel에 필요한 인자를 추가합니다. add_model_specific_args 메서드 대체용입니다."""
+    group = parser.add_argument_group("GRINModel")
+    group.add_argument("--hidden-size", type=int, default=64)
+    group.add_argument("--ff-size", type=int, default=64)
+    group.add_argument("--embedding-size", type=int, default=8)
+    group.add_argument("--n-layers", type=int, default=1)
+    group.add_argument("--kernel-size", type=int, default=2)
+    group.add_argument("--decoder-order", type=int, default=1)
+    group.add_argument("--layer-norm", action="store_true", default=False)
+    group.add_argument("--ff-dropout", type=float, default=0.0)
+    group.add_argument("--merge-mode", type=str, default="mlp")
+    return parser
+
+
+def add_spatiotemporal_datamodule_args(parser):
+    """SpatioTemporalDataModule에 필요한 인자를 추가합니다. add_argparse_args 메서드 대체용입니다."""
+    group = parser.add_argument_group("SpatioTemporalDataModule")
+    group.add_argument(
+        "--mask_scaling", type=bool, nargs="?", const=True, default=False
+    )
+    group.add_argument("--batch_size", type=int, default=32)
+    group.add_argument("--workers", type=int, default=0)
+    group.add_argument("--pin_memory", type=bool, nargs="?", const=True, default=True)
+    return parser
+
+
 def parse_args():
     # Argument parser
     parser = ArgParser()
@@ -84,6 +153,12 @@ def parse_args():
     parser.add_argument("--model-name", type=str, default="spin")
     parser.add_argument("--dataset-name", type=str, default="bay_block")
     parser.add_argument("--config", type=str, default="imputation/spin.yaml")
+    parser.add_argument(
+        "--log-dir", type=str, default="logs"
+    )  # 로그 디렉토리 인자 추가
+    parser.add_argument(
+        "--config-dir", type=str, default="config"
+    )  # 설정 디렉토리 인자 추가
 
     # Splitting/aggregation params
     parser.add_argument("--val-len", type=float, default=0.1)
@@ -106,14 +181,25 @@ def parse_args():
 
     known_args, _ = parser.parse_known_args()
     model_cls, imputer_cls = get_model_classes(known_args.model_name)
-    parser = model_cls.add_model_specific_args(parser)
-    parser = imputer_cls.add_argparse_args(parser)
-    parser = SpatioTemporalDataModule.add_argparse_args(parser)
-    parser = ImputationDataset.add_argparse_args(parser)
+
+    # 모델 타입에 따라 적절한 인자 추가 함수 호출
+    if known_args.model_name in ["spin", "spin_h"]:
+        parser = add_spin_model_args(parser)
+    elif known_args.model_name == "grin":
+        parser = add_grin_model_args(parser)
+    else:
+        # 기본적으로는 모델 클래스의 add_model_specific_args 메서드 사용 시도
+        if hasattr(model_cls, "add_model_specific_args"):
+            parser = model_cls.add_model_specific_args(parser)
+
+    parser = add_imputer_args(parser)
+    parser = add_spatiotemporal_datamodule_args(parser)
+    parser = add_imputation_dataset_args(parser)
 
     args = parser.parse_args()
     if args.config is not None:
-        cfg_path = os.path.join(config.config_dir, args.config)
+        # config.config_dir 대신 args.config_dir 사용
+        cfg_path = os.path.join(args.config_dir, args.config)
         with open(cfg_path, "r") as fp:
             config_args = yaml.load(fp, Loader=yaml.FullLoader)
         for arg in config_args:
@@ -144,7 +230,10 @@ def run_experiment(args):
 
     exp_name = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     exp_name = f"{exp_name}_{args.seed}"
-    logdir = os.path.join(config.log_dir, args.dataset_name, args.model_name, exp_name)
+
+    # config.log_dir 대신 args.log_dir 사용
+    logdir = os.path.join(args.log_dir, args.dataset_name, args.model_name, exp_name)
+
     # save config for logging
     os.makedirs(logdir, exist_ok=True)
     with open(os.path.join(logdir, "config.yaml"), "w") as fp:
