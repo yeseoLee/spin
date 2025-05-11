@@ -6,7 +6,7 @@ import numpy as np
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
-from SPIN.utils import ArgParser, casting, numpy_metrics, parser_utils
+from utils import ArgParser, casting, numpy_metrics, parser_utils
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tsl import config, logger
@@ -14,7 +14,6 @@ from tsl.data import ImputationDataset, SpatioTemporalDataModule
 from tsl.data.preprocessing import StandardScaler
 from tsl.datasets import PemsBay
 from tsl.engines import Imputer
-from tsl.imputers import Imputer
 from tsl.metrics.torch import MaskedMAE, MaskedMetric, MaskedMRE, MaskedMSE
 from tsl.nn.models import GRINModel, SPINHierarchicalModel, SPINModel
 from tsl.ops.imputation import add_missing_values
@@ -149,7 +148,9 @@ def run_experiment(args):
     # save config for logging
     os.makedirs(logdir, exist_ok=True)
     with open(os.path.join(logdir, "config.yaml"), "w") as fp:
-        yaml.dump(parser_utils.config_dict_from_args(args), fp, indent=4, sort_keys=True)
+        yaml.dump(
+            parser_utils.config_dict_from_args(args), fp, indent=4, sort_keys=True
+        )
 
     ########################################
     # data module                          #
@@ -165,7 +166,9 @@ def run_experiment(args):
         exog_map = input_map = None
 
     if is_spin or args.model_name == "grin":
-        adj = dataset.get_connectivity(threshold=args.adj_threshold, include_self=False, force_symmetric=is_spin)
+        adj = dataset.get_connectivity(
+            threshold=args.adj_threshold, include_self=False, force_symmetric=is_spin
+        )
     else:
         adj = None
 
@@ -229,7 +232,9 @@ def run_experiment(args):
     scheduler_class, scheduler_kwargs = get_scheduler(args.lr_scheduler, args)
 
     # setup imputer
-    imputer_kwargs = parser_utils.filter_argparse_args(args, imputer_class, return_dict=True)
+    imputer_kwargs = parser_utils.filter_argparse_args(
+        args, imputer_class, return_dict=True
+    )
     imputer = imputer_class(
         model_class=model_cls,
         model_kwargs=model_kwargs,
@@ -247,8 +252,12 @@ def run_experiment(args):
     ########################################
 
     # callbacks
-    early_stop_callback = EarlyStopping(monitor="val_mae", patience=args.patience, mode="min")
-    checkpoint_callback = ModelCheckpoint(dirpath=logdir, save_top_k=1, monitor="val_mae", mode="min")
+    early_stop_callback = EarlyStopping(
+        monitor="val_mae", patience=args.patience, mode="min"
+    )
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=logdir, save_top_k=1, monitor="val_mae", mode="min"
+    )
 
     tb_logger = TensorBoardLogger(logdir, name="model")
 
@@ -277,9 +286,13 @@ def run_experiment(args):
 
     imputer.load_model(checkpoint_callback.best_model_path)
     imputer.freeze()
-    trainer.test(imputer, dataloaders=dm.test_dataloader(batch_size=args.batch_inference))
+    trainer.test(
+        imputer, dataloaders=dm.test_dataloader(batch_size=args.batch_inference)
+    )
 
-    output = trainer.predict(imputer, dataloaders=dm.test_dataloader(batch_size=args.batch_inference))
+    output = trainer.predict(
+        imputer, dataloaders=dm.test_dataloader(batch_size=args.batch_inference)
+    )
     output = casting.numpy(output)
     y_hat, y_true, mask = (
         output["y_hat"].squeeze(-1),

@@ -3,8 +3,8 @@ import os
 
 import numpy as np
 import pytorch_lightning as pl
-from SPIN.utils import ArgParser, casting, numpy_metrics, parser_utils
-from SPIN.utils.python_utils import ensure_list
+from utils import ArgParser, casting, numpy_metrics, parser_utils
+from utils.python_utils import ensure_list
 import torch
 import tsl
 from tsl import config
@@ -103,7 +103,9 @@ def load_model(exp_dir, exp_config, dm):
     )
 
     # setup imputer
-    imputer_kwargs = parser_utils.filter_argparse_args(exp_config, imputer_class, return_dict=True)
+    imputer_kwargs = parser_utils.filter_argparse_args(
+        exp_config, imputer_class, return_dict=True
+    )
     imputer = imputer_class(
         model_class=model_cls,
         model_kwargs=model_kwargs,
@@ -185,7 +187,9 @@ def run_experiment(args):
         exog_map = input_map = None
 
     if is_spin or args.model_name == "grin":
-        adj = dataset.get_connectivity(threshold=args.adj_threshold, include_self=False, force_symmetric=is_spin)
+        adj = dataset.get_connectivity(
+            threshold=args.adj_threshold, include_self=False, force_symmetric=is_spin
+        )
     else:
         adj = None
 
@@ -206,7 +210,9 @@ def run_experiment(args):
 
     scalers = {"data": StandardScaler(axis=(0, 1))}
 
-    dm = SpatioTemporalDataModule(torch_dataset, scalers=scalers, splitter=splitter, batch_size=args.batch_size)
+    dm = SpatioTemporalDataModule(
+        torch_dataset, scalers=scalers, splitter=splitter, batch_size=args.batch_size
+    )
     dm.setup()
 
     ########################################
@@ -215,7 +221,9 @@ def run_experiment(args):
 
     imputer = load_model(exp_dir, exp_config, dm)
 
-    trainer = pl.Trainer(accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1)
+    trainer = pl.Trainer(
+        accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1
+    )
 
     ########################################
     # inference                            #
